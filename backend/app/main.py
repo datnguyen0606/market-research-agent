@@ -29,7 +29,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Market Research Agent API", version="1.0.0", lifespan=lifespan)
 
 allowed_origins = [
-    os.getenv("ALLOWED_ORIGIN", "https://your-app.vercel.app"),
+    os.getenv("FRONTEND_URL", "https://your-app.vercel.app"),
     "http://localhost:5173",
     "http://localhost:3000",
 ]
