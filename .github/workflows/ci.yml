@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "001-*"]
+  pull_request:
+    branches: [main]
+
+jobs:
+  backend-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install -r backend/requirements.txt
+      - name: Run unit tests
+        run: cd backend && pytest tests/unit/ -v
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          JINA_API_KEY: ${{ secrets.JINA_API_KEY }}
+          QDRANT_URL: ${{ secrets.QDRANT_URL }}
+          QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
+          TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+      - name: Run DeepEval CI gate
+        run: cd backend && pytest tests/eval/ -v
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          DEEPEVAL_API_KEY: ${{ secrets.DEEPEVAL_API_KEY }}
+          JINA_API_KEY: ${{ secrets.JINA_API_KEY }}
+
+  frontend-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install dependencies
+        run: cd frontend && npm install
+      - name: Build
+        run: cd frontend && npm run build
+        env:
+          VITE_API_URL: https://placeholder.railway.app
+          VITE_AUTH_USER: ci
+          VITE_AUTH_PASS: ci
