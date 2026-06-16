@@ -2,7 +2,7 @@ fastapi==0.111.0
 uvicorn[standard]==0.30.0
 sse-starlette==1.8.2
 langgraph==0.2.60
-langgraph-checkpoint-postgres==1.0.4
+langgraph-checkpoint-postgres==2.0.18
 langchain-anthropic==0.2.0
 langsmith==0.1.0
 qdrant-client==1.9.0
@@ -14,7 +14,7 @@ pydantic==2.7.0
 python-multipart==0.0.9
 python-dotenv==1.0.0
 psycopg2-binary==2.9.9
-psycopg[binary]==3.1.18
+psycopg[binary]==3.2.6
 psycopg-pool==3.2.2
 deepeval==0.21.0
 pytest==8.2.0
