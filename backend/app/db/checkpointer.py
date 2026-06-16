@@ -15,6 +15,7 @@ async def init_checkpointer() -> AsyncPostgresSaver:
     _pool = AsyncConnectionPool(
         conninfo=os.getenv("DATABASE_URL"),
         max_size=10,
+        kwargs={"autocommit": True},
         open=False,
     )
     await _pool.open()
