@@ -1,7 +1,7 @@
 fastapi==0.111.0
 uvicorn[standard]==0.30.0
 sse-starlette==1.8.2
-langgraph==0.2.0
+langgraph==0.2.60
 langgraph-checkpoint-postgres==1.0.4
 langchain-anthropic==0.2.0
 langsmith==0.1.0
