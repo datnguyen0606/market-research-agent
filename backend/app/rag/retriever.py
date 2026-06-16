@@ -10,8 +10,9 @@ from qdrant_client.models import (
     MatchValue,
 )
 
+from app.db.postgres import fetch_parent_block
+
 COLLECTION_CHUNKS = "financial_chunks"
-COLLECTION_PARENTS = "parent_blocks"
 VECTOR_SIZE = 768
 
 
@@ -22,24 +23,18 @@ def _client() -> QdrantClient:
     )
 
 
-def _ensure_collections(client: QdrantClient) -> None:
+def _ensure_collection(client: QdrantClient) -> None:
     existing = {c.name for c in client.get_collections().collections}
     if COLLECTION_CHUNKS not in existing:
         client.create_collection(
             COLLECTION_CHUNKS,
             vectors_config=VectorParams(size=VECTOR_SIZE, distance=Distance.COSINE),
         )
-    if COLLECTION_PARENTS not in existing:
-        # Payload-only collection — use a tiny dummy vector dimension
-        client.create_collection(
-            COLLECTION_PARENTS,
-            vectors_config=VectorParams(size=1, distance=Distance.COSINE),
-        )
 
 
 def ticker_has_index(ticker: str) -> bool:
     client = _client()
-    _ensure_collections(client)
+    _ensure_collection(client)
     result = client.count(
         COLLECTION_CHUNKS,
         count_filter=Filter(must=[FieldCondition(key="ticker", match=MatchValue(value=ticker))]),
@@ -49,14 +44,11 @@ def ticker_has_index(ticker: str) -> bool:
 
 
 def delete_ticker_index(ticker: str) -> None:
+    """Delete child vectors from Qdrant. Caller is responsible for deleting parent blocks from PostgreSQL."""
     client = _client()
-    _ensure_collections(client)
+    _ensure_collection(client)
     client.delete(
         COLLECTION_CHUNKS,
-        points_selector=Filter(must=[FieldCondition(key="ticker", match=MatchValue(value=ticker))]),
-    )
-    client.delete(
-        COLLECTION_PARENTS,
         points_selector=Filter(must=[FieldCondition(key="ticker", match=MatchValue(value=ticker))]),
     )
 
@@ -64,12 +56,11 @@ def delete_ticker_index(ticker: str) -> None:
 def upsert_to_qdrant(
     ticker: str, chunks: list[dict], embeddings: list[list[float]], r2_key: str
 ) -> None:
+    """Upsert child chunk vectors to Qdrant. Parent blocks are stored in PostgreSQL separately."""
     client = _client()
-    _ensure_collections(client)
+    _ensure_collection(client)
 
     child_points = []
-    parent_points = []
-
     child_vectors = iter(embeddings)
 
     for chunk in chunks:
@@ -90,25 +81,9 @@ def upsert_to_qdrant(
                     },
                 )
             )
-        elif chunk["type"] == "parent":
-            parent_points.append(
-                PointStruct(
-                    id=str(uuid.uuid5(uuid.NAMESPACE_DNS, chunk["id"])),
-                    vector=[0.0],  # dummy vector for payload-only collection
-                    payload={
-                        "ticker": ticker,
-                        "full_text": chunk["text"],
-                        "page": chunk["page"],
-                        "r2_key": r2_key,
-                        "parent_id": chunk["id"],
-                    },
-                )
-            )
 
     if child_points:
         client.upsert(COLLECTION_CHUNKS, points=child_points)
-    if parent_points:
-        client.upsert(COLLECTION_PARENTS, points=parent_points)
 
 
 def search_chunks(ticker: str, query_vector: list[float], top_k: int = 20) -> list[dict]:
@@ -120,21 +95,12 @@ def search_chunks(ticker: str, query_vector: list[float], top_k: int = 20) -> li
         limit=top_k,
         with_payload=True,
     )
-    return [{"text_snippet": r.payload["text_snippet"], "parent_id": r.payload["parent_id"], "score": r.score} for r in results]
+    return [
+        {"text_snippet": r.payload["text_snippet"], "parent_id": r.payload["parent_id"], "score": r.score}
+        for r in results
+    ]
 
 
 def fetch_parent(parent_id: str, ticker: str) -> dict | None:
-    client = _client()
-    results = client.scroll(
-        COLLECTION_PARENTS,
-        scroll_filter=Filter(must=[
-            FieldCondition(key="parent_id", match=MatchValue(value=parent_id)),
-            FieldCondition(key="ticker", match=MatchValue(value=ticker)),
-        ]),
-        limit=1,
-        with_payload=True,
-    )
-    points = results[0]
-    if points:
-        return points[0].payload
-    return None
+    """Fetch full parent block text from PostgreSQL."""
+    return fetch_parent_block(parent_id, ticker)

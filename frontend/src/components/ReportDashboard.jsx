@@ -2,8 +2,9 @@ import MetricsPanel from './MetricsPanel'
 import SwotCard from './SwotCard'
 import SentimentBadge from './SentimentBadge'
 import ExportButton from './ExportButton'
+import ChatPanel from './ChatPanel'
 
-export default function ReportDashboard({ report, onRegenerate }) {
+export default function ReportDashboard({ report, onRegenerate, onReportUpdate }) {
   const rd = report.report_data || {}
 
   return (
@@ -12,7 +13,9 @@ export default function ReportDashboard({ report, onRegenerate }) {
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
         <div>
           <h2 className="text-2xl font-bold text-gray-900">{report.company_name}</h2>
-          <p className="text-gray-500 text-sm">{report.ticker} · {new Date(report.timestamp).toLocaleString()}</p>
+          <p className="text-gray-500 text-sm">
+            {report.ticker} · {report.timestamp ? new Date(report.timestamp).toLocaleString() : ''}
+          </p>
         </div>
         <div className="flex items-center gap-3">
           <SentimentBadge sentiment={rd.market_sentiment} />
@@ -62,6 +65,14 @@ export default function ReportDashboard({ report, onRegenerate }) {
       <p className="text-xs text-gray-400">
         Validation cycles: {rd.critic_iterations ?? '—'}
       </p>
+
+      {/* Chat */}
+      {report.thread_id && (
+        <section>
+          <h3 className="text-lg font-semibold text-gray-800 mb-3">Refine with Chat</h3>
+          <ChatPanel threadId={report.thread_id} onReportUpdate={onReportUpdate} />
+        </section>
+      )}
     </div>
   )
 }

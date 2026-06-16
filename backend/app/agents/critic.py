@@ -8,7 +8,7 @@ SWOT_KEYS = ["strengths", "weaknesses", "opportunities", "threats"]
 VALID_SENTIMENTS = {"Bullish", "Bearish", "Neutral"}
 
 
-def _validate(analysis: dict) -> list[str]:
+def _structural_issues(analysis: dict) -> list[str]:
     issues = []
     for field in REQUIRED_FIELDS:
         if field not in analysis or analysis[field] is None:
@@ -25,7 +25,7 @@ def _validate(analysis: dict) -> list[str]:
             if not isinstance(items, list) or len(items) == 0:
                 issues.append(f"swot_analysis.{key} must be a non-empty list")
     else:
-        issues.append("swot_analysis must be an object")
+        issues.append("swot_analysis must be an object with four quadrants")
 
     sentiment = analysis.get("market_sentiment", "")
     if sentiment not in VALID_SENTIMENTS:
@@ -35,12 +35,16 @@ def _validate(analysis: dict) -> list[str]:
 
 
 def critic_node(state: AgentReportState) -> dict:
+    """
+    Rule-based structural validation only — fast and free.
+    LLM-as-Judge runs offline after report delivery (see app/agents/judge.py).
+    """
     analysis = state.get("financial_analysis") or {}
     iterations = state.get("iterations", 0) + 1
-    issues = _validate(analysis)
+    issues = _structural_issues(analysis)
 
     if not issues:
-        logger.info("Critic: approved on iteration %d", iterations)
+        logger.info("Critic: approved iteration=%d", iterations)
         return {
             "is_approved": True,
             "iterations": iterations,
@@ -48,10 +52,10 @@ def critic_node(state: AgentReportState) -> dict:
             "final_report_json": {**analysis, "critic_iterations": iterations},
         }
 
-    logger.warning("Critic: %d issues on iteration %d: %s", len(issues), iterations, issues)
+    logger.warning("Critic: %d structural issues iteration=%d: %s", len(issues), iterations, issues)
 
     if iterations >= 3:
-        logger.warning("Critic: max iterations reached, delivering best available result")
+        logger.warning("Critic: max iterations — delivering despite structural issues")
         return {
             "is_approved": False,
             "iterations": iterations,
@@ -59,10 +63,9 @@ def critic_node(state: AgentReportState) -> dict:
             "final_report_json": {**analysis, "critic_iterations": iterations},
         }
 
-    feedback = "Please fix the following issues:\n" + "\n".join(f"- {i}" for i in issues)
     return {
         "is_approved": False,
         "iterations": iterations,
-        "critic_feedback": feedback,
+        "critic_feedback": "Fix structural issues:\n" + "\n".join(f"- {i}" for i in issues),
         "final_report_json": None,
     }

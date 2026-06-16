@@ -1,5 +1,7 @@
-from typing import Any, Optional
+from typing import Annotated, Any, Optional
 from typing_extensions import TypedDict
+from langchain_core.messages import BaseMessage
+from langgraph.graph.message import add_messages
 
 
 class AgentReportState(TypedDict):
@@ -12,6 +14,8 @@ class AgentReportState(TypedDict):
     retrieved_financials: list[str]
     market_news: list[str]
     financial_analysis: dict[str, Any]
+    # Chat history — add_messages reducer merges lists across checkpoints
+    messages: Annotated[list[BaseMessage], add_messages]
     # Control flow
     critic_feedback: Optional[str]
     iterations: int
