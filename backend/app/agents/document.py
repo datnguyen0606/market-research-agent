@@ -18,7 +18,7 @@ def document_rag_node(state: ResearchState) -> dict:
         query_dense = dense_vecs[0]
         query_sparse = sparse_vecs[0]
     except Exception as exc:
-        logger.warning("Document RAG: embedding failed — %s", exc)
+        logger.warning("Document RAG: embedding failed — %s", exc, exc_info=True)
         return {"retrieved_docs": []}
 
     candidates = search_chunks(query_dense, query_sparse, top_k=20)

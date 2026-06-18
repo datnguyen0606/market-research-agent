@@ -14,7 +14,12 @@ def web_search_node(state: ResearchState) -> dict:
         logger.info("Web search: no queries from router, skipping")
         return {"web_results": []}
 
-    client = Exa(api_key=os.getenv("EXA_API_KEY"))
+    try:
+        client = Exa(api_key=os.getenv("EXA_API_KEY"))
+    except Exception as exc:
+        logger.warning("Web search: failed to initialise Exa client — %s", exc, exc_info=True)
+        return {"web_results": []}
+
     all_results: list[dict] = []
     seen_urls: set[str] = set()
 

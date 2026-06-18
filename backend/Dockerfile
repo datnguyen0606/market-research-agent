@@ -8,6 +8,12 @@ RUN apt-get update && apt-get install -y \
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+
+# Pre-download the fastembed BM25 model so it's baked into the image.
+# Without this, the model downloads from HuggingFace on the first request,
+# blocking document_rag_node and potentially timing out on Railway cold start.
+RUN python -c "from fastembed import SparseTextEmbedding; SparseTextEmbedding('Qdrant/bm25')"
+
 COPY . .
 
 EXPOSE 8080
