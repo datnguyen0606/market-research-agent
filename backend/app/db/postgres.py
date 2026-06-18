@@ -36,6 +36,24 @@ def get_conn():
 def init_schema() -> None:
     with get_conn() as conn:
         with conn.cursor() as cur:
+            # One-time migration: drop old ticker-based tables if they still exist.
+            # CREATE TABLE IF NOT EXISTS won't replace them, but the new indexes
+            # reference doc_id which doesn't exist in the old schema.
+            # feedback_events, report_quality, and checkpoint tables are unaffected.
+            cur.execute("""
+                DO $$
+                BEGIN
+                  IF EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'documents' AND column_name = 'ticker'
+                  ) THEN
+                    DROP TABLE IF EXISTS parent_blocks;
+                    DROP TABLE IF EXISTS documents;
+                    RAISE NOTICE 'init_schema: dropped old ticker-based tables, recreating with doc_id schema';
+                  END IF;
+                END $$;
+            """)
+
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS documents (
                     doc_id          TEXT         PRIMARY KEY,
