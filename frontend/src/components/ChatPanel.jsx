@@ -72,8 +72,7 @@ export default function ChatPanel() {
 
   const NODE_LABELS = {
     router: 'Planning search strategy…',
-    document_rag: 'Searching documents…',
-    web_search: 'Searching the web…',
+    retrieval: 'Searching documents and web…',
     analyst: 'Synthesising answer…',
     grounding: 'Verifying sources…',
   }

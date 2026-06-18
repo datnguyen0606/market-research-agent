@@ -16,6 +16,7 @@ from app.agents.analyst import analyst_node
 from app.agents.grounding import grounding_node
 from app.agents.document import document_rag_node
 from app.agents.search import web_search_node
+from app.agents.retrieval import retrieval_node
 
 
 def _state(**overrides) -> dict:

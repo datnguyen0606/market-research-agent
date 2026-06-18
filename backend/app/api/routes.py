@@ -76,7 +76,7 @@ async def stream_research(
                 "sources": state.get("sources", []),
                 "grounding_passed": state.get("grounding_passed", True),
             })
-        return EventSourceResponse(_immediate())
+        return EventSourceResponse(_immediate(), ping=15)
 
     initial = _initial_state(query=query)
 
@@ -102,7 +102,7 @@ async def stream_research(
             logger.exception("Stream error thread=%s", tid)
             yield _sse({"event": "error", "message": "An unexpected error occurred. Please try again."})
 
-    return EventSourceResponse(generator())
+    return EventSourceResponse(generator(), ping=15)
 
 
 @router.post("/research/chat/{thread_id}")
@@ -147,7 +147,7 @@ async def chat_stream(request: Request, thread_id: str, body: ChatMessage):
             logger.exception("Chat error thread=%s", thread_id)
             yield _sse({"event": "error", "message": "Chat failed. Please try again."})
 
-    return EventSourceResponse(generator())
+    return EventSourceResponse(generator(), ping=15)
 
 
 @router.post("/documents/upload", response_model=UploadResponse)
