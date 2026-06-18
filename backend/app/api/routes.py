@@ -1,4 +1,5 @@
 import asyncio
+import io
 import json
 import logging
 import uuid
@@ -12,47 +13,44 @@ from langchain_core.messages import HumanMessage
 from app.schemas import UploadResponse, EventRequest, ChatMessage
 from app.agents.graph import build_graph
 from app.db.postgres import (
-    delete_parent_blocks, insert_parent_blocks, upsert_document,
-    insert_report_placeholder, insert_feedback_event, fetch_langsmith_run_id,
+    insert_document, insert_parent_blocks, insert_feedback_event,
 )
-from app.rag.chunker import extract_pages, chunk_document
-from app.rag.embedder import embed_chunks
-from app.rag.retriever import delete_ticker_index, upsert_to_qdrant
-from app.storage.r2 import upload_pdf
+from app.rag.chunker import extract_pages, chunk_document, extract_docx_pages, chunk_docx_pages
+from app.rag.embedder import embed_chunks, embed_sparse
+from app.rag.retriever import upsert_to_qdrant
+from app.storage.r2 import upload_document as r2_upload
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1")
 
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024  # 20 MB
+ACCEPTED_TYPES = {
+    "application/pdf": "pdf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
+}
 
 
 def _sse(data: dict) -> dict:
     return {"data": json.dumps(data)}
 
 
-def _initial_state(ticker: str, company_name: str, focus_areas: list[str]) -> dict:
+def _initial_state(query: str) -> dict:
     return {
-        "company_name": company_name,
-        "ticker": ticker,
-        "raw_query": f"Financial analysis of {company_name} ({ticker})",
-        "focus_areas": focus_areas,
-        "retrieved_financials": [],
-        "market_news": [],
-        "financial_analysis": {},
+        "query": query,
+        "search_queries": [],
+        "retrieved_docs": [],
+        "web_results": [],
         "messages": [],
-        "critic_feedback": None,
-        "iterations": 0,
-        "is_approved": False,
-        "final_report_json": None,
+        "answer": None,
+        "sources": [],
+        "grounding_passed": False,
     }
 
 
 @router.get("/research/stream")
-async def stream_report(
+async def stream_research(
     request: Request,
-    ticker: str,
-    company_name: str,
-    focus_areas: str = "",
+    query: str,
     thread_id: str | None = None,
 ):
     tid = thread_id or str(uuid.uuid4())
@@ -60,37 +58,27 @@ async def stream_report(
     config = {
         "configurable": {"thread_id": tid},
         "run_id": langsmith_run_id,
-        "metadata": {"thread_id": tid, "ticker": ticker.upper()},
+        "metadata": {"thread_id": tid},
     }
     checkpointer = request.app.state.checkpointer
     graph = build_graph(checkpointer)
-    ticker = ticker.upper()
 
-    # Reconnect: thread already completed
+    # Reconnect: thread already has an answer
     existing = await graph.aget_state(config)
-    if existing.values and existing.values.get("final_report_json"):
+    if existing.values and existing.values.get("answer"):
         async def _immediate():
             state = existing.values
             yield _sse({
                 "event": "done",
                 "thread_id": tid,
-                "ticker": ticker,
-                "company_name": company_name,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
-                "validation_passed": state.get("is_approved", False),
-                "validation_warning": (
-                    "Report delivered after 3 validation attempts without full approval. "
-                    "Financial figures should be independently verified."
-                ) if not state.get("is_approved") else None,
-                "report_data": state["final_report_json"],
+                "answer": state["answer"],
+                "sources": state.get("sources", []),
+                "grounding_passed": state.get("grounding_passed", True),
             })
         return EventSourceResponse(_immediate())
 
-    initial = _initial_state(
-        ticker=ticker,
-        company_name=company_name,
-        focus_areas=[f.strip() for f in focus_areas.split(",") if f.strip()],
-    )
+    initial = _initial_state(query=query)
 
     async def generator():
         try:
@@ -99,27 +87,13 @@ async def stream_report(
                     yield _sse({"event": "node_complete", "node": node_name})
 
             final = (await graph.aget_state(config)).values
-            report = final.get("final_report_json") or {}
-            validation_passed = final.get("is_approved", False)
-            critic_iterations = report.get("critic_iterations", 0)
-
-            # Register unscored row — batch job will fill in judge scores later
-            await asyncio.to_thread(
-                insert_report_placeholder, tid, ticker, critic_iterations, langsmith_run_id
-            )
-
             yield _sse({
                 "event": "done",
                 "thread_id": tid,
-                "ticker": ticker,
-                "company_name": company_name,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
-                "validation_passed": validation_passed,
-                "validation_warning": (
-                    "Report delivered after 3 validation attempts without full approval. "
-                    "Financial figures should be independently verified."
-                ) if not validation_passed else None,
-                "report_data": report,
+                "answer": final.get("answer", ""),
+                "sources": final.get("sources", []),
+                "grounding_passed": final.get("grounding_passed", True),
             })
 
         except ValueError as exc:
@@ -146,11 +120,8 @@ async def chat_stream(request: Request, thread_id: str, body: ChatMessage):
     if not existing.values:
         raise HTTPException(status_code=404, detail=f"Thread '{thread_id}' not found.")
 
-    # Raw signal — classified into an intent (correction/question/satisfied) by the
-    # feedback batch job, then mirrored to this run in LangSmith.
     await asyncio.to_thread(
-        insert_feedback_event, thread_id, existing.values.get("ticker"), "chat_sent",
-        body.message, langsmith_run_id,
+        insert_feedback_event, thread_id, "chat_sent", body.message, langsmith_run_id,
     )
 
     async def generator():
@@ -164,12 +135,12 @@ async def chat_stream(request: Request, thread_id: str, body: ChatMessage):
                     yield _sse({"event": "node_complete", "node": node_name})
 
             final = (await graph.aget_state(config)).values
-
             yield _sse({
                 "event": "done",
                 "thread_id": thread_id,
-                "validation_passed": final.get("is_approved", False),
-                "report_data": final.get("final_report_json") or {},
+                "answer": final.get("answer", ""),
+                "sources": final.get("sources", []),
+                "grounding_passed": final.get("grounding_passed", True),
             })
 
         except Exception:
@@ -180,52 +151,80 @@ async def chat_stream(request: Request, thread_id: str, body: ChatMessage):
 
 
 @router.post("/documents/upload", response_model=UploadResponse)
-async def upload_document(ticker: str = Form(...), file: UploadFile = File(...)):
-    ticker = ticker.upper()
-    pdf_bytes = await file.read()
-
-    if len(pdf_bytes) > MAX_UPLOAD_BYTES:
+async def upload_document(file: UploadFile = File(...)):
+    file_bytes = await file.read()
+    if len(file_bytes) > MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail="File exceeds 20 MB limit.")
 
-    try:
-        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-        if doc.page_count == 0:
-            raise ValueError("PDF has no pages.")
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail="Not a valid PDF or contains no extractable text.") from exc
+    filename = file.filename or "document"
+    content_type = file.content_type or ""
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
 
-    filename = file.filename or f"{ticker}.pdf"
-    r2_key = upload_pdf(ticker, filename, pdf_bytes)
-    pages = extract_pages(doc)
-    chunks = chunk_document(pages)
+    # Determine file type
+    if content_type in ACCEPTED_TYPES:
+        file_type = ACCEPTED_TYPES[content_type]
+    elif ext == "pdf":
+        file_type = "pdf"
+    elif ext == "docx":
+        file_type = "docx"
+    else:
+        raise HTTPException(status_code=400, detail="Only PDF and DOCX files are supported.")
+
+    doc_id = str(uuid.uuid4())
+
+    # Parse and chunk
+    prefix = doc_id[:12] + "_"
+    if file_type == "pdf":
+        try:
+            doc = fitz.open(stream=file_bytes, filetype="pdf")
+            if doc.page_count == 0:
+                raise ValueError("PDF has no pages.")
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="Not a valid PDF or contains no extractable text.") from exc
+        raw_pages = extract_pages(doc)
+        page_count = len(raw_pages)
+        chunks = [
+            {**chunk, "id": prefix + chunk["id"], "parent_id": prefix + chunk["parent_id"]}
+            for chunk in chunk_document(raw_pages)
+        ]
+    else:
+        raw_pages = extract_docx_pages(file_bytes)
+        page_count = len(raw_pages)
+        chunks = [
+            {**chunk, "id": prefix + chunk["id"], "parent_id": prefix + chunk["parent_id"]}
+            for chunk in chunk_docx_pages(raw_pages)
+        ]
 
     child_chunks = [c for c in chunks if c["type"] == "child"]
     if not child_chunks:
-        raise HTTPException(status_code=400, detail="PDF contains no extractable text content.")
+        raise HTTPException(status_code=400, detail="Document contains no extractable text.")
 
-    embeddings = embed_chunks([c["text"] for c in child_chunks])
+    # Embed (dense + sparse)
+    texts = [c["text"] for c in child_chunks]
+    dense_embeddings = embed_chunks(texts)
+    sparse_embeddings = embed_sparse(texts)
 
-    delete_ticker_index(ticker)
-    delete_parent_blocks(ticker)
-    upsert_to_qdrant(ticker, chunks, embeddings, r2_key)
-    insert_parent_blocks(ticker, chunks, r2_key)
-    upsert_document(ticker, r2_key, filename, len(pages), len(child_chunks))
+    # Store in R2
+    r2_key = r2_upload(doc_id, filename, file_bytes)
 
-    logger.info("Indexed %d chunks for ticker=%s", len(child_chunks), ticker)
+    # Upsert to Qdrant
+    upsert_to_qdrant(doc_id, chunks, dense_embeddings, sparse_embeddings, r2_key, filename)
+
+    # Store parent blocks + document record in Postgres
+    await asyncio.to_thread(insert_parent_blocks, doc_id, chunks, r2_key, filename)
+    await asyncio.to_thread(insert_document, doc_id, filename, file_type, r2_key, page_count, len(child_chunks))
+
+    logger.info("Indexed %d chunks for doc_id=%s filename=%s", len(child_chunks), doc_id, filename)
     return UploadResponse(
-        ticker=ticker,
-        r2_key=r2_key,
-        pages_processed=len(pages),
+        doc_id=doc_id,
+        filename=filename,
+        file_type=file_type,
+        pages_processed=page_count,
         chunks_stored=len(child_chunks),
     )
 
 
 @router.post("/events")
 async def log_event(payload: EventRequest):
-    """Log an implicit, behavior-based signal (regenerated/exported) against the
-    report's existing LangSmith run — mirrored there by the feedback batch job."""
-    langsmith_run_id = await asyncio.to_thread(fetch_langsmith_run_id, payload.thread_id)
-    await asyncio.to_thread(
-        insert_feedback_event, payload.thread_id, payload.ticker, payload.event_type, None, langsmith_run_id
-    )
+    await asyncio.to_thread(insert_feedback_event, payload.thread_id, payload.event_type)
     return {"logged": True}

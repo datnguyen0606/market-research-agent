@@ -1,40 +1,45 @@
 import logging
 import os
-from tavily import TavilyClient
-from app.agents.state import AgentReportState
-from app.rag.embedder import rerank
+
+from exa_py import Exa
+
+from app.agents.state import ResearchState
 
 logger = logging.getLogger(__name__)
 
 
-def market_search_node(state: AgentReportState) -> dict:
-    ticker = state["ticker"]
-    company_name = state["company_name"]
-    query = f"{company_name} {ticker} financial news earnings analyst"
+def web_search_node(state: ResearchState) -> dict:
+    search_queries = state.get("search_queries") or []
+    if not search_queries:
+        logger.info("Web search: no queries from router, skipping")
+        return {"web_results": []}
 
-    logger.info("Market Search: querying Tavily for ticker=%s", ticker)
-    client = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
+    client = Exa(api_key=os.getenv("EXA_API_KEY"))
+    all_results: list[dict] = []
+    seen_urls: set[str] = set()
 
-    try:
-        response = client.search(query, max_results=20, search_depth="advanced")
-        results = response.get("results", [])
-    except Exception as exc:
-        logger.warning("Tavily search failed: %s", exc)
-        return {"market_news": []}
+    for query in search_queries:
+        logger.info("Web search: Exa query=%r", query[:80])
+        try:
+            response = client.search_and_contents(
+                query,
+                type="auto",
+                num_results=5,
+                text={"max_characters": 1500},
+                highlights={"num_sentences": 3, "highlights_per_url": 2},
+            )
+            for r in response.results:
+                if r.url in seen_urls:
+                    continue
+                seen_urls.add(r.url)
+                all_results.append({
+                    "title": r.title or "",
+                    "url": r.url or "",
+                    "text": r.text or "",
+                    "highlights": r.highlights or [],
+                })
+        except Exception as exc:
+            logger.warning("Web search: Exa query failed query=%r — %s", query[:60], exc)
 
-    if not results:
-        return {"market_news": []}
-
-    snippets = [r.get("content", "") for r in results if r.get("content")]
-    if not snippets:
-        return {"market_news": []}
-
-    try:
-        reranked = rerank(query, snippets, top_n=5)
-        top_snippets = [snippets[item["index"]] for item in reranked]
-    except Exception as exc:
-        logger.warning("Reranking failed, using raw top-5: %s", exc)
-        top_snippets = snippets[:5]
-
-    logger.info("Market Search: selected %d news snippets", len(top_snippets))
-    return {"market_news": top_snippets}
+    logger.info("Web search: collected %d unique results", len(all_results))
+    return {"web_results": all_results}

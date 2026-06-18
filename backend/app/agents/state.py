@@ -4,21 +4,17 @@ from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
 
 
-class AgentReportState(TypedDict):
+class ResearchState(TypedDict):
     # Input
-    company_name: str
-    ticker: str
-    raw_query: str
-    focus_areas: list[str]
-    # Intermediate
-    retrieved_financials: list[str]
-    market_news: list[str]
-    financial_analysis: dict[str, Any]
-    # Chat history — add_messages reducer merges lists across checkpoints
+    query: str
+    # Router output — Exa sub-queries (empty = skip web search)
+    search_queries: list[str]
+    # Retrieval results
+    retrieved_docs: list[str]
+    web_results: list[dict[str, Any]]   # [{title, url, text, highlights}]
+    # Chat history — add_messages reducer merges across checkpoints
     messages: Annotated[list[BaseMessage], add_messages]
-    # Control flow
-    critic_feedback: Optional[str]
-    iterations: int
-    is_approved: bool
     # Output
-    final_report_json: Optional[dict[str, Any]]
+    answer: Optional[str]
+    sources: list[dict[str, Any]]       # [{title, url, snippet}]
+    grounding_passed: bool

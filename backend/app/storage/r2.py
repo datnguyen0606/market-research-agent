@@ -12,10 +12,10 @@ def get_r2_client():
     )
 
 
-def upload_pdf(ticker: str, filename: str, pdf_bytes: bytes) -> str:
+def upload_document(doc_id: str, filename: str, file_bytes: bytes) -> str:
     r2 = get_r2_client()
-    key = f"pdfs/{ticker}/{filename}"
-    r2.put_object(Bucket=os.getenv("R2_BUCKET_NAME"), Key=key, Body=pdf_bytes)
+    key = f"docs/{doc_id}/{filename}"
+    r2.put_object(Bucket=os.getenv("R2_BUCKET_NAME"), Key=key, Body=file_bytes)
     return key
 
 

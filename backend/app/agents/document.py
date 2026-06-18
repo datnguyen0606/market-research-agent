@@ -1,42 +1,52 @@
 import logging
-from app.agents.state import AgentReportState
-from app.rag.embedder import embed_chunks, rerank
-from app.rag.retriever import ticker_has_index, search_chunks, fetch_parent
+from app.agents.state import ResearchState
+from app.rag.embedder import embed_chunks, embed_sparse, rerank
+from app.rag.retriever import search_chunks, fetch_parent
 
 logger = logging.getLogger(__name__)
 
 
-def document_rag_node(state: AgentReportState) -> dict:
-    ticker = state["ticker"]
-    query = state["raw_query"]
+def document_rag_node(state: ResearchState) -> dict:
+    messages = state.get("messages") or []
+    query = state["query"] if not messages else (messages[-1].content if messages else state["query"])
 
-    if not ticker_has_index(ticker):
-        logger.info("Document RAG: no index for ticker=%s, skipping", ticker)
-        return {"retrieved_financials": []}
+    logger.info("Document RAG: hybrid search query=%r", query[:80])
 
-    logger.info("Document RAG: retrieving context for ticker=%s", ticker)
-    query_vector = embed_chunks([query])[0]
-    candidates = search_chunks(ticker, query_vector, top_k=20)
+    try:
+        dense_vecs = embed_chunks([query])
+        sparse_vecs = embed_sparse([query])
+        query_dense = dense_vecs[0]
+        query_sparse = sparse_vecs[0]
+    except Exception as exc:
+        logger.warning("Document RAG: embedding failed — %s", exc)
+        return {"retrieved_docs": []}
 
+    candidates = search_chunks(query_dense, query_sparse, top_k=20)
     if not candidates:
-        return {"retrieved_financials": []}
+        logger.info("Document RAG: no chunks found")
+        return {"retrieved_docs": []}
 
-    candidate_texts = [c["text_snippet"] for c in candidates]
-    reranked = rerank(query, candidate_texts, top_n=5)
-    top_parent_ids = []
-    for item in reranked:
-        idx = item["index"]
-        top_parent_ids.append(candidates[idx]["parent_id"])
+    # Rerank candidate snippets for precision
+    snippets = [c["text_snippet"] for c in candidates]
+    try:
+        reranked = rerank(query, snippets, top_n=8)
+        top_candidates = [candidates[item["index"]] for item in reranked]
+    except Exception as exc:
+        logger.warning("Document RAG: reranking failed — %s", exc)
+        top_candidates = candidates[:8]
 
-    parent_texts = []
-    seen = set()
-    for parent_id in top_parent_ids:
-        if parent_id in seen:
+    # Fetch full parent blocks for the top candidates
+    parent_texts: list[str] = []
+    seen: set[str] = set()
+    for c in top_candidates:
+        pid = c["parent_id"]
+        if pid in seen:
             continue
-        seen.add(parent_id)
-        parent = fetch_parent(parent_id, ticker)
+        seen.add(pid)
+        parent = fetch_parent(pid)
         if parent:
-            parent_texts.append(parent["full_text"])
+            filename = c.get("filename") or parent.get("filename") or "document"
+            parent_texts.append(f"Source: {filename}\n\n{parent['full_text']}")
 
     logger.info("Document RAG: retrieved %d parent blocks", len(parent_texts))
-    return {"retrieved_financials": parent_texts}
+    return {"retrieved_docs": parent_texts}

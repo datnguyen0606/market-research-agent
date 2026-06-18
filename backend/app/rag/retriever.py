@@ -4,16 +4,21 @@ from qdrant_client import QdrantClient
 from qdrant_client.models import (
     Distance,
     VectorParams,
+    SparseVectorParams,
+    SparseIndexParams,
+    SparseVector,
     PointStruct,
-    Filter,
-    FieldCondition,
-    MatchValue,
+    Prefetch,
+    FusionQuery,
+    Fusion,
 )
 
 from app.db.postgres import fetch_parent_block
 
 COLLECTION_CHUNKS = "financial_chunks"
-VECTOR_SIZE = 768
+DENSE_VECTOR_SIZE = 768
+DENSE_NAME = "dense"
+SPARSE_NAME = "sparse"
 
 
 def _client() -> QdrantClient:
@@ -28,79 +33,108 @@ def _ensure_collection(client: QdrantClient) -> None:
     if COLLECTION_CHUNKS not in existing:
         client.create_collection(
             COLLECTION_CHUNKS,
-            vectors_config=VectorParams(size=VECTOR_SIZE, distance=Distance.COSINE),
+            vectors_config={
+                DENSE_NAME: VectorParams(size=DENSE_VECTOR_SIZE, distance=Distance.COSINE),
+            },
+            sparse_vectors_config={
+                SPARSE_NAME: SparseVectorParams(index=SparseIndexParams(on_disk=False)),
+            },
         )
 
 
-def ticker_has_index(ticker: str) -> bool:
-    client = _client()
-    _ensure_collection(client)
-    result = client.count(
-        COLLECTION_CHUNKS,
-        count_filter=Filter(must=[FieldCondition(key="ticker", match=MatchValue(value=ticker))]),
-        exact=True,
-    )
-    return result.count > 0
-
-
-def delete_ticker_index(ticker: str) -> None:
-    """Delete child vectors from Qdrant. Caller is responsible for deleting parent blocks from PostgreSQL."""
+def delete_doc_index(doc_id: str) -> None:
+    """Delete all vectors belonging to a specific uploaded document."""
+    from qdrant_client.models import Filter, FieldCondition, MatchValue
     client = _client()
     _ensure_collection(client)
     client.delete(
         COLLECTION_CHUNKS,
-        points_selector=Filter(must=[FieldCondition(key="ticker", match=MatchValue(value=ticker))]),
+        points_selector=Filter(must=[FieldCondition(key="doc_id", match=MatchValue(value=doc_id))]),
     )
 
 
 def upsert_to_qdrant(
-    ticker: str, chunks: list[dict], embeddings: list[list[float]], r2_key: str
+    doc_id: str,
+    chunks: list[dict],
+    dense_embeddings: list[list[float]],
+    sparse_embeddings: list[dict],
+    r2_key: str,
+    filename: str = "",
 ) -> None:
-    """Upsert child chunk vectors to Qdrant. Parent blocks are stored in PostgreSQL separately."""
     client = _client()
     _ensure_collection(client)
 
-    child_points = []
-    child_vectors = iter(embeddings)
+    child_chunks = [c for c in chunks if c["type"] == "child"]
+    if len(child_chunks) != len(dense_embeddings) or len(child_chunks) != len(sparse_embeddings):
+        raise ValueError("Mismatch between chunks and embeddings counts")
 
-    for chunk in chunks:
-        if chunk["type"] == "child":
-            vector = next(child_vectors)
-            child_points.append(
-                PointStruct(
-                    id=str(uuid.uuid5(uuid.NAMESPACE_DNS, chunk["id"])),
-                    vector=vector,
-                    payload={
-                        "type": "child",
-                        "parent_id": chunk["parent_id"],
-                        "ticker": ticker,
-                        "r2_key": r2_key,
-                        "text_snippet": chunk["text"][:500],
-                        "page": chunk["page"],
-                        "chunk_id": chunk["id"],
-                    },
-                )
+    points = []
+    for chunk, dense_vec, sparse_vec in zip(child_chunks, dense_embeddings, sparse_embeddings):
+        points.append(
+            PointStruct(
+                id=str(uuid.uuid5(uuid.NAMESPACE_DNS, chunk["id"])),
+                vector={
+                    DENSE_NAME: dense_vec,
+                    SPARSE_NAME: SparseVector(
+                        indices=sparse_vec["indices"],
+                        values=sparse_vec["values"],
+                    ),
+                },
+                payload={
+                    "type": "child",
+                    "parent_id": chunk["parent_id"],
+                    "doc_id": doc_id,
+                    "filename": filename,
+                    "r2_key": r2_key,
+                    "text_snippet": chunk["text"][:500],
+                    "page": chunk["page"],
+                    "chunk_id": chunk["id"],
+                },
             )
+        )
 
-    if child_points:
-        client.upsert(COLLECTION_CHUNKS, points=child_points)
+    if points:
+        client.upsert(COLLECTION_CHUNKS, points=points)
 
 
-def search_chunks(ticker: str, query_vector: list[float], top_k: int = 20) -> list[dict]:
+def search_chunks(
+    query_dense: list[float],
+    query_sparse: dict,
+    top_k: int = 20,
+) -> list[dict]:
+    """Hybrid search (dense + sparse BM25, RRF fusion). No partition filter."""
     client = _client()
-    results = client.search(
-        COLLECTION_CHUNKS,
-        query_vector=query_vector,
-        query_filter=Filter(must=[FieldCondition(key="ticker", match=MatchValue(value=ticker))]),
+    _ensure_collection(client)
+
+    results = client.query_points(
+        collection_name=COLLECTION_CHUNKS,
+        prefetch=[
+            Prefetch(query=query_dense, using=DENSE_NAME, limit=top_k * 2),
+            Prefetch(
+                query=SparseVector(
+                    indices=query_sparse["indices"],
+                    values=query_sparse["values"],
+                ),
+                using=SPARSE_NAME,
+                limit=top_k * 2,
+            ),
+        ],
+        query=FusionQuery(fusion=Fusion.RRF),
         limit=top_k,
         with_payload=True,
     )
+
     return [
-        {"text_snippet": r.payload["text_snippet"], "parent_id": r.payload["parent_id"], "score": r.score}
-        for r in results
+        {
+            "text_snippet": r.payload["text_snippet"],
+            "parent_id": r.payload["parent_id"],
+            "doc_id": r.payload.get("doc_id", ""),
+            "filename": r.payload.get("filename", ""),
+            "score": r.score,
+        }
+        for r in results.points
     ]
 
 
-def fetch_parent(parent_id: str, ticker: str) -> dict | None:
-    """Fetch full parent block text from PostgreSQL."""
-    return fetch_parent_block(parent_id, ticker)
+def fetch_parent(parent_id: str) -> dict | None:
+    return fetch_parent_block(parent_id)
